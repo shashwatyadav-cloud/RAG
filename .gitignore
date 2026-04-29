@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+vectordb/
+vectorsydb/
+vectordbsy/
