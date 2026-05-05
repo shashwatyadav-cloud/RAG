@@ -1,107 +1,163 @@
-import fitz
-from sentence_transformers import SentenceTransformer
-import chromadb 
-from openai import OpenAI
-import os
+import streamlit as st
 from dotenv import load_dotenv
+import os
+
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_openai import ChatOpenAI
+from langchain_tavily import TavilySearch
 
 load_dotenv()
 
-client_openrouter = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key = os.getenv("OPENROUTER_API_KEY")
-)
+# -------------------------
+# 🔹 PAGE CONFIG
+# -------------------------
+st.set_page_config(page_title="RAG Agent", layout="wide")
 
-def extract_pdf(path):
-    doc = fitz.open(path)
-    text = ""
-    for page in doc:
-        text+=page.get_text()
+st.title("🧠 RAG Agent (PDF + Web)")
+st.write("Ask questions from your PDF or the web")
 
-    return text
-
-
-def split_text(text,chunk_size=500):
-    chunks = []
-
-    for i in range(0,len(text),chunk_size):
-        chunk = text[i:i + chunk_size]
-        chunks.append(chunk)
-    
-    return chunks 
-
-model = SentenceTransformer("all-MiniLM-L6-v2")
-
-def create_embeddings(chunks):
-    embeddings = model.encode(chunks)
-    return embeddings
-
-
-client = chromadb.PersistentClient(path="./vectordb")
-
-collection = client.get_or_create_collection(
-    name="pdf_data"
-)
-
-def search_chunks(question):
-    question_embedding = model.encode(question).tolist()
-
-    results = collection.query(
-        query_embeddings=[question_embedding],
-        n_results=3
+# -------------------------
+# 🔹 INIT MODELS (CACHE)
+# -------------------------
+@st.cache_resource
+def load_system():
+    embedding_model = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
-    return results["documents"][0]
+    vectorstore = Chroma(
+        persist_directory="./chroma_db",
+        embedding_function=embedding_model
+    )
 
-def store_in_vector_db(chunks, embeddings):
-    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-        collection.add(
-            ids=[str(i)],
-            documents=[chunk],
-            embeddings=[embedding.tolist()]
-        )
-def generate_answer(question, chunks):
-    context = "\n".join(chunks)
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+
+    llm = ChatOpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        model="openai/gpt-4o-mini"
+    )
+
+    return retriever, llm
+
+retriever, llm = load_system()
+
+# -------------------------
+# 🔹 PDF SEARCH
+# -------------------------
+def pdf_search(query: str):
+    docs = retriever.invoke(query)
+
+    if not docs:
+        return "NO_ANSWER_FOUND", "❌ PDF EMPTY"
+
+    context = "\n\n".join([doc.page_content for doc in docs])
+
+    if len(context.strip()) < 50:
+        return "NO_ANSWER_FOUND", "❌ PDF TOO WEAK"
 
     prompt = f"""
-    Answer the question only using the context below.
-    if not in context say i dont know
+    Answer only from the context.
+    If answer not found, say I don't know.
 
     Context:
     {context}
 
     Question:
-    {question}
+    {query}
     """
 
-    response = client_openrouter.chat.completions.create(
-        model="openai/gpt-4o-mini",
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
-    )
+    answer = llm.invoke(prompt).content
+    return answer, "📄 USED PDF"
 
-    return response.choices[0].message.content
+# -------------------------
+# 🔹 WEB SEARCH
+# -------------------------
+def web_search(query: str):
+    web_tool = TavilySearch(max_results=3)
+    results = web_tool.invoke({"query": query})
 
-print("ChromaDB setup complete")
+    if isinstance(results, list):
+        texts = []
+        for r in results:
+            if isinstance(r, dict):
+                texts.append(r.get("content", ""))
+            else:
+                texts.append(str(r))
+        context = "\n\n".join(texts)
+    else:
+        context = str(results)
 
-pdf_text = extract_pdf("nodeJs.pdf")
-chunks = split_text(pdf_text)
+    prompt = f"""
+    Answer clearly using this information:
 
-embeddings = create_embeddings(chunks)
-store_in_vector_db(chunks, embeddings)
-print("Stored in vector database successfully")
+    {context}
 
-# print("Total chunks:", len(chunks))
-# print("Embedding shape:", embeddings.shape)
+    Question: {query}
+    """
 
+    answer = llm.invoke(prompt).content
+    return answer, "🌐 USED WEB"
 
-question = input("Ask your question: ")
+# -------------------------
+# 🔹 DECISION
+# -------------------------
+def decide_source(query: str):
+    prompt = f"""
+    Decide where to answer from:
 
-matched_chunks = search_chunks(question)
+    - PDF → for programming, Node.js, internal docs
+    - WEB → for latest info, news
 
+    Only return one word: PDF or WEB
 
-answer = generate_answer(question, matched_chunks)
+    Question: {query}
+    """
 
-print("\nAnswer:\n")
-print(answer)
+    decision = llm.invoke(prompt).content.strip().upper()
+    return decision
+
+# -------------------------
+# 🔹 ROUTER
+# -------------------------
+def smart_router(query: str):
+    decision = decide_source(query)
+
+    if "PDF" in decision:
+        answer, source = pdf_search(query)
+
+        if answer != "NO_ANSWER_FOUND":
+            return answer, decision, source
+
+        # fallbackstreamlit run app.py
+        answer, source = web_search(query)
+        return answer, "PDF → WEB", source
+
+    else:
+        answer, source = web_search(query)
+        return answer, decision, source
+
+# -------------------------
+# 🔹 UI INPUT
+# -------------------------
+query = st.text_input("Ask your question:")
+
+if st.button("Ask"):
+    if query.strip() == "":
+        st.warning("Please enter a question")
+    else:
+        with st.spinner("Thinking..."):
+            answer, decision, source = smart_router(query)
+
+        # -------------------------
+        # 🔹 OUTPUT
+        # -------------------------
+        st.subheader("Answer")
+        st.write(answer)
+
+        st.markdown("---")
+
+        st.subheader("Debug Info")
+        st.write(f"🧠 Decision: {decision}")
+        st.write(f"{source}")

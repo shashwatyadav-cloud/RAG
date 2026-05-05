@@ -1,7 +1,7 @@
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_qdrant import QdrantVectorStore
+from langchain_chroma import Chroma
 
 loader = PyMuPDFLoader("nodeJs.pdf")
 documents = loader.load()
@@ -17,11 +17,10 @@ embedding_model = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
 
-QdrantVectorStore.from_documents(
+vectorstore = Chroma.from_documents(
     documents=docs,
     embedding=embedding_model,
-    url="http://localhost:6333",
-    collection_name="pdf_docs"
+    persist_directory="./chroma_db"  
 )
 
 print("Documents stored successfully")
