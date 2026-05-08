@@ -1,5 +1,5 @@
 venv/
-.env/
+.env
 __pycache__/
 *.pyc
 *.pyo
@@ -7,3 +7,4 @@ __pycache__/
 vectordb/
 vectorsydb/
 vectordbsy/
+chroma_db/
